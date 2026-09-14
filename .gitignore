@@ -1,13 +1,15 @@
-# Never commit the runtime payload to git (electron.exe > 100MB)
+# Runtime only — do not ignore the API/UI binaries (clients need them).
+# electron.exe alone exceeds GitHub's 100MB limit, so install via npm after clone/update.
+
 node_modules/
-_internal/
-WhatsAppSenderAPI.exe
-WhatsApp Sender.exe
-frontend/dist/
-secure/
 uploads/
 wa_chrome_profile/
+_update_tmp/
 output.log
 *.zip
 .DS_Store
 Thumbs.db
+
+# Keep encryption key; ignore local SQL settings per machine
+secure/*
+!secure/users.key
