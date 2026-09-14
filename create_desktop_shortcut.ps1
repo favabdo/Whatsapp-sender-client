@@ -30,18 +30,19 @@ if (-not (Test-Path $appExe)) {
 $oldLnk = Join-Path $root "WhatsApp Sender.lnk"
 if (Test-Path $oldLnk) { Remove-Item -LiteralPath $oldLnk -Force -ErrorAction SilentlyContinue }
 
-# اختصار الديسكتوب → الـ EXE الحقيقي
+# اختصار الديسكتوب → الـ EXE الحقيقي + أيقونة ICO صريحة (مش من الـ EXE بس)
 Get-ChildItem $desktop -Filter "*WhatsApp*Sender*.lnk" -ErrorAction SilentlyContinue | Remove-Item -Force
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($desktopLnk)
 $shortcut.TargetPath = $appExe
 $shortcut.Arguments = ""
 $shortcut.WorkingDirectory = $root
-$shortcut.IconLocation = "$appExe,0"
+$shortcut.IconLocation = "$icon,0"
 $shortcut.Description = "WhatsApp Sender"
 $shortcut.WindowStyle = 1
 $shortcut.Save()
 
 Write-Host "App EXE: $appExe"
 Write-Host "Desktop: $desktopLnk"
+Write-Host "Icon: $icon"
 ie4uinit.exe -show 2>$null
