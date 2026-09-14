@@ -1,0 +1,13 @@
+# Never commit the runtime payload to git (electron.exe > 100MB)
+node_modules/
+_internal/
+WhatsAppSenderAPI.exe
+WhatsApp Sender.exe
+frontend/dist/
+secure/
+uploads/
+wa_chrome_profile/
+output.log
+*.zip
+.DS_Store
+Thumbs.db
