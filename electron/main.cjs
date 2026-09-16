@@ -25,14 +25,10 @@ const isDev =
 
 ipcMain.handle('update:getConfig', async () => {
   try {
-    const cfg = loadConfig(ROOT)
+    const cfg = loadConfig(root)
     return {
       ok: true,
       version: cfg.version,
-      githubOwner: cfg.githubOwner,
-      githubRepo: cfg.githubRepo,
-      branch: cfg.branch || 'main',
-      repoUrl: `https://github.com/${cfg.githubOwner}/${cfg.githubRepo}`,
     }
   } catch (err) {
     return {
@@ -44,20 +40,18 @@ ipcMain.handle('update:getConfig', async () => {
 
 ipcMain.handle('update:saveConfig', async (_event, payload) => {
   try {
-    const cfg = saveConfig(ROOT, {
-      githubOwner: payload?.githubOwner,
-      githubRepo: payload?.githubRepo,
-      branch: payload?.branch,
+    const patch = {}
+    if (payload?.githubOwner) patch.githubOwner = payload.githubOwner
+    if (payload?.githubRepo) patch.githubRepo = payload.githubRepo
+    if (payload?.branch) patch.branch = payload.branch
+    const cfg = saveConfig(root, {
+      ...patch,
       // version is controlled by releases/repo — don't let UI downgrade casually
-      version: loadConfig(ROOT).version,
+      version: loadConfig(root).version,
     })
     return {
       ok: true,
       version: cfg.version,
-      githubOwner: cfg.githubOwner,
-      githubRepo: cfg.githubRepo,
-      branch: cfg.branch || 'main',
-      repoUrl: `https://github.com/${cfg.githubOwner}/${cfg.githubRepo}`,
     }
   } catch (err) {
     return {
