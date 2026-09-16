@@ -19,23 +19,25 @@ internal static class Program
                 return;
             }
 
-            var electron = Path.Combine(root, "node_modules", "electron", "dist", "electron.exe");
             var indexHtml = Path.Combine(root, "frontend", "dist", "index.html");
 
-            if (!File.Exists(electron))
+            if (!File.Exists(indexHtml))
             {
                 MessageBox.Show(
-                    "Electron is missing.\nOpen this folder and run: npm install",
+                    "UI build missing (frontend\\dist).\nRebuild the client package.",
                     "WhatsApp Sender",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
             }
 
-            if (!File.Exists(indexHtml))
+            // Electron runtime: check multiple locations so the app works whether
+            // shipped via npm (node_modules) or bundled as a portable package.
+            var electron = FindElectron(root);
+            if (string.IsNullOrEmpty(electron))
             {
                 MessageBox.Show(
-                    "UI build missing (frontend\\dist).\nRebuild the client package.",
+                    "Electron is missing.\nRe-download the full client package.",
                     "WhatsApp Sender",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -61,6 +63,24 @@ internal static class Program
             MessageBox.Show(ex.Message, "WhatsApp Sender",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private static string FindElectron(string root)
+    {
+        // Preferred: standard npm install location
+        var candidates = new[]
+        {
+            Path.Combine(root, "node_modules", "electron", "dist", "electron.exe"),
+            // Bundled runtime (portable package)
+            Path.Combine(root, "_internal", "electron", "dist", "electron.exe"),
+            Path.Combine(root, "electron_runtime.exe"),
+            Path.Combine(root, "electron.exe"),
+        };
+        foreach (var c in candidates)
+        {
+            if (File.Exists(c)) return c;
+        }
+        return null;
     }
 
     private static void TrySilent(string fileName, string args)
