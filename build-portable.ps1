@@ -58,7 +58,8 @@ $exclude = @(
   '_update_tmp',
   '.git',
   'secure\settings.key',
-  'secure\sql_settings.bin'
+  'secure\sql_settings.bin',
+  'portable'
 )
 
 function Copy-Tree($src, $dst) {
