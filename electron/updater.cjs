@@ -2,7 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const https = require('https')
 const http = require('http')
-const { execFileSync } = require('child_process')
+const { execFileSync, execSync } = require('child_process')
 
 const DEFAULT_OWNER = 'favabdo'
 const DEFAULT_REPO = 'Whatsapp-sender-client'
@@ -317,6 +317,41 @@ async function checkForUpdate(root) {
   }
 }
 
+// Kill running API + chromedriver so files can be replaced during update
+function killApi() {
+  if (process.platform !== 'win32') return
+  try {
+    const out = execSync('netstat -ano | findstr :8787', {
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+    const pids = new Set()
+    for (const line of out.split(/\r?\n/)) {
+      if (!line.includes('LISTENING')) continue
+      const parts = line.trim().split(/\s+/)
+      const pid = parts[parts.length - 1]
+      if (pid && /^\d+$/.test(pid) && pid !== '0') pids.add(pid)
+    }
+    for (const pid of pids) {
+      try {
+        execSync(`taskkill /PID ${pid} /F /T`, { windowsHide: true, stdio: 'ignore' })
+      } catch (_) { /* ignore */ }
+    }
+  } catch (_) { /* nothing listening */ }
+  try {
+    execSync('taskkill /IM WhatsAppSenderAPI.exe /F /T', {
+      windowsHide: true,
+      stdio: 'ignore',
+    })
+  } catch (_) { /* ignore */ }
+  try {
+    execSync('taskkill /IM chromedriver.exe /F /T', {
+      windowsHide: true,
+      stdio: 'ignore',
+    })
+  } catch (_) { /* ignore */ }
+}
+
 function copyPreserve(srcDir, destDir, preserveNames) {
   if (!fs.existsSync(srcDir)) return
   fs.mkdirSync(destDir, { recursive: true })
@@ -418,6 +453,9 @@ async function applyUpdate(root, sendProgress) {
     'node_modules',
     'output.log',
   ])
+  // Kill running API before replacing locked files
+  killApi()
+
   sendProgress?.({ phase: 'install', percent: 100 })
   copyPreserve(payloadDir, root, preserve)
 
