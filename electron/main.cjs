@@ -7,7 +7,6 @@ const {
   checkForUpdate,
   applyUpdate,
   loadConfig,
-  saveConfig,
 } = require('./updater.cjs')
 
 // اسم التطبيق في شريط المهام / Alt-Tab (ويندوز)
@@ -23,9 +22,20 @@ const API_PORT = 8787
 const isDev =
   process.env.ELECTRON_DEV === '1' || process.argv.includes('--dev')
 
+function publicUpdateInfo(info) {
+  return {
+    updateAvailable: Boolean(info?.updateAvailable),
+    localVersion: info?.localVersion,
+    remoteVersion: info?.remoteVersion,
+    releaseName: info?.releaseName,
+    reason: info?.reason,
+    error: info?.error,
+  }
+}
+
 ipcMain.handle('update:getConfig', async () => {
   try {
-    const cfg = loadConfig(root)
+    const cfg = loadConfig(ROOT)
     return {
       ok: true,
       version: cfg.version,
@@ -38,38 +48,16 @@ ipcMain.handle('update:getConfig', async () => {
   }
 })
 
-ipcMain.handle('update:saveConfig', async (_event, payload) => {
-  try {
-    const patch = {}
-    if (payload?.githubOwner) patch.githubOwner = payload.githubOwner
-    if (payload?.githubRepo) patch.githubRepo = payload.githubRepo
-    if (payload?.branch) patch.branch = payload.branch
-    const cfg = saveConfig(root, {
-      ...patch,
-      // version is controlled by releases/repo — don't let UI downgrade casually
-      version: loadConfig(root).version,
-    })
-    return {
-      ok: true,
-      version: cfg.version,
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    }
-  }
-})
 
 ipcMain.handle('update:check', async () => {
   try {
-    return await checkForUpdate(ROOT)
+    return publicUpdateInfo(await checkForUpdate(ROOT))
   } catch (err) {
-    return {
+    return publicUpdateInfo({
       updateAvailable: false,
       reason: 'check_failed',
       error: err instanceof Error ? err.message : String(err),
-    }
+    })
   }
 })
 
@@ -284,20 +272,6 @@ app.whenReady().then(async () => {
     console.error(err)
   }
   await createWindow()
-
-  // Update check is non-blocking: never stall startup on network.
-  // It runs silently in the background; the user can trigger it manually
-  // from Settings → App Updates.
-  try {
-    const cfg = loadConfig(ROOT)
-    if (cfg && cfg.version) {
-      checkForUpdate(ROOT).then((info) => {
-        if (info && info.updateAvailable) {
-          mainWindow?.webContents?.send('update:available', info)
-        }
-      }).catch(() => { /* offline — ignore */ })
-    }
-  } catch (_) { /* ignore */ }
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {

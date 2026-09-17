@@ -2,7 +2,6 @@
 # electron.exe alone exceeds GitHub's 100MB limit, so install via npm after clone/update.
 
 node_modules/
-portable/
 uploads/
 wa_chrome_profile/
 _update_tmp/
