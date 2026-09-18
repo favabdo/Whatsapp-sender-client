@@ -1,12 +1,12 @@
 {
   "name": "whatsapp-sender-client",
   "productName": "WhatsApp Sender",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "private": true,
   "description": "WhatsApp Sender",
   "author": "Nile Techno",
   "main": "electron/main.cjs",
   "dependencies": {
-    "electron": "35.1.2"
+    "electron": "^35.1.2"
   }
 }
