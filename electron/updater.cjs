@@ -2,7 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const https = require('https')
 const http = require('http')
-const { execFileSync } = require('child_process')
+const { execFileSync, spawn } = require('child_process')
 
 const DEFAULT_OWNER = 'favabdo'
 const DEFAULT_REPO = 'Whatsapp-sender-client'
@@ -317,54 +317,65 @@ async function checkForUpdate(root) {
   }
 }
 
-function copyPreserve(srcDir, destDir, preserveNames) {
-  if (!fs.existsSync(srcDir)) return
-  fs.mkdirSync(destDir, { recursive: true })
-  for (const name of fs.readdirSync(srcDir)) {
-    if (preserveNames.has(name)) continue
-    const from = path.join(srcDir, name)
-    const to = path.join(destDir, name)
-    const st = fs.statSync(from)
-    if (st.isDirectory()) {
-      fs.cpSync(from, to, { recursive: true, force: true })
-    } else {
-      fs.copyFileSync(from, to)
-    }
-  }
+function psQuote(p) {
+  return String(p).replace(/'/g, "''")
 }
 
-function ensureElectronRuntime(root, sendProgress) {
-  sendProgress?.({ phase: 'install', percent: 100 })
-  const electronExe = path.join(
-    root,
-    'node_modules',
-    'electron',
-    'dist',
-    'electron.exe',
+function buildApplyScript(root, payloadDir, version) {
+  return `$ErrorActionPreference = 'SilentlyContinue'
+$root = '${psQuote(root)}'
+$payload = '${psQuote(payloadDir)}'
+$tmp = Join-Path $root '_update_tmp'
+$nextVersion = '${psQuote(normalizeVersion(version || '0.0.0'))}'
+Start-Sleep -Seconds 5
+Stop-Process -Name 'WhatsAppSenderAPI' -Force
+Stop-Process -Name 'chromedriver' -Force
+Stop-Process -Name 'WhatsApp Sender' -Force
+Start-Sleep -Seconds 2
+if (Test-Path (Join-Path $payload '_internal')) {
+  robocopy (Join-Path $payload '_internal') (Join-Path $root '_internal') /MIR /R:20 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+}
+if (Test-Path (Join-Path $payload 'frontend')) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $root 'frontend') | Out-Null
+  robocopy (Join-Path $payload 'frontend') (Join-Path $root 'frontend') /MIR /R:20 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+}
+robocopy $payload $root /E /XF update-config.json /XD secure wa_chrome_profile uploads node_modules _update_tmp /R:20 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+try {
+  $cfgPath = Join-Path $root 'update-config.json'
+  if (Test-Path $cfgPath) { $j = Get-Content $cfgPath -Raw | ConvertFrom-Json } else { $j = [pscustomobject]@{} }
+  $j | Add-Member -Force -NotePropertyName version -NotePropertyValue $nextVersion
+  if (-not $j.githubOwner) { $j | Add-Member -Force -NotePropertyName githubOwner -NotePropertyValue 'favabdo' }
+  if (-not $j.githubRepo) { $j | Add-Member -Force -NotePropertyName githubRepo -NotePropertyValue 'Whatsapp-sender-client' }
+  if (-not $j.branch) { $j | Add-Member -Force -NotePropertyName branch -NotePropertyValue 'main' }
+  if (-not $j.assetNameContains) { $j | Add-Member -Force -NotePropertyName assetNameContains -NotePropertyValue 'WhatsApp-Sender-Client' }
+  if ($null -eq $j.githubToken) { $j | Add-Member -Force -NotePropertyName githubToken -NotePropertyValue '' }
+  [IO.File]::WriteAllText($cfgPath, ($j | ConvertTo-Json))
+} catch {}
+Remove-Item (Join-Path $tmp 'update.zip') -Force
+Remove-Item (Join-Path $tmp 'extract') -Recurse -Force
+Start-Process -FilePath (Join-Path $root 'Start WhatsApp Sender.bat') -WindowStyle Hidden
+`;
+}
+
+function spawnApplyScript(root) {
+  const script = path.join(root, '_update_tmp', 'apply_update.ps1')
+  const child = spawn(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-WindowStyle',
+      'Hidden',
+      '-File',
+      script,
+    ],
+    { detached: true, stdio: 'ignore', windowsHide: true },
   )
-  const pkgPath = path.join(root, 'package.json')
-  if (!fs.existsSync(pkgPath)) return
-  if (fs.existsSync(electronExe)) {
-    // still refresh deps lightly when package.json changed
-    try {
-      execFileSync('npm.cmd', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
-        cwd: root,
-        windowsHide: true,
-        stdio: 'ignore',
-      })
-    } catch (_) {
-      /* optional */
-    }
-    return
-  }
-  execFileSync('npm.cmd', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
-    cwd: root,
-    windowsHide: true,
-    stdio: 'inherit',
-  })
+  child.unref()
 }
 
-async function applyUpdate(root, sendProgress) {
+async function stageUpdate(root, sendProgress) {
   const info = await checkForUpdate(root)
   if (!info.updateAvailable) {
     return { ok: false, error: 'No update available' }
@@ -398,7 +409,7 @@ async function applyUpdate(root, sendProgress) {
     [
       '-NoProfile',
       '-Command',
-      `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${extractDir.replace(/'/g, "''")}' -Force`,
+      `Expand-Archive -LiteralPath '${psQuote(zipPath)}' -DestinationPath '${psQuote(extractDir)}' -Force`,
     ],
     { windowsHide: true },
   )
@@ -410,48 +421,32 @@ async function applyUpdate(root, sendProgress) {
     if (fs.statSync(only).isDirectory()) payloadDir = only
   }
 
-  const preserve = new Set([
-    'secure',
-    'wa_chrome_profile',
-    'uploads',
-    'users.db',
-    '_update_tmp',
-    'node_modules',
-    'output.log',
-  ])
+  fs.writeFileSync(
+    path.join(tmpRoot, 'pending_version.txt'),
+    info.remoteVersion,
+    'utf8',
+  )
+  const script = buildApplyScript(root, payloadDir, info.remoteVersion)
+  fs.writeFileSync(path.join(tmpRoot, 'apply_update.ps1'), script, 'utf8')
   sendProgress?.({ phase: 'install', percent: 100 })
-  copyPreserve(payloadDir, root, preserve)
+  return { ok: true, staged: true, version: info.remoteVersion }
+}
 
-  // merge users.key from package if local secure missing it
-  try {
-    const srcKey = path.join(payloadDir, 'secure', 'users.key')
-    const dstSecure = path.join(root, 'secure')
-    const dstKey = path.join(dstSecure, 'users.key')
-    if (fs.existsSync(srcKey)) {
-      fs.mkdirSync(dstSecure, { recursive: true })
-      if (!fs.existsSync(dstKey)) fs.copyFileSync(srcKey, dstKey)
-    }
-  } catch (_) {
-    /* ignore */
+// Legacy entry — kept for older callers; now stages instead of copying in-place.
+async function applyUpdate(root, sendProgress) {
+  const result = await stageUpdate(root, sendProgress)
+  if (result.ok) {
+    spawnApplyScript(root)
   }
-
-  ensureElectronRuntime(root, sendProgress)
-
-  // bump local version to remote (keep linked repo settings)
-  saveConfig(root, {
-    version: info.remoteVersion,
-    githubOwner: cfg.githubOwner,
-    githubRepo: cfg.githubRepo,
-    branch: cfg.branch || 'main',
-  })
-
-  fs.rmSync(tmpRoot, { recursive: true, force: true })
-  return { ok: true, version: info.remoteVersion }
+  return result
 }
 
 module.exports = {
   checkForUpdate,
   applyUpdate,
+  stageUpdate,
+  spawnApplyScript,
+  buildApplyScript,
   loadConfig,
   saveConfig,
   compareVersions,

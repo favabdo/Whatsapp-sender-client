@@ -5,7 +5,8 @@ const { spawn, execSync } = require('child_process')
 const http = require('http')
 const {
   checkForUpdate,
-  applyUpdate,
+  stageUpdate,
+  spawnApplyScript,
   loadConfig,
 } = require('./updater.cjs')
 
@@ -63,7 +64,7 @@ ipcMain.handle('update:check', async () => {
 
 ipcMain.handle('update:apply', async (event) => {
   try {
-    const result = await applyUpdate(ROOT, (progress) => {
+    const result = await stageUpdate(ROOT, (progress) => {
       try {
         event.sender.send('update:progress', progress)
       } catch (_) {
@@ -71,9 +72,10 @@ ipcMain.handle('update:apply', async (event) => {
       }
     })
     if (result.ok) {
-      // أعد تشغيل التطبيق بعد التحديث
+      // التطبيق يقفل نفسه والسكربت الخارجي يكمل الاستبدال ويعيد التشغيل
+      stopPythonApi()
+      spawnApplyScript(ROOT)
       setTimeout(() => {
-        app.relaunch()
         app.exit(0)
       }, 600)
     }
