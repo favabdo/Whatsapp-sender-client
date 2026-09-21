@@ -9,6 +9,8 @@ output.log
 update.log
 UPDATE_FAILED.txt
 *.zip
+# PyInstaller freezes the stdlib into _internal/base_library.zip - the API cannot start without it
+!_internal/**/*.zip
 .DS_Store
 Thumbs.db
 
