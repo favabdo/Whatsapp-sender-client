@@ -72,9 +72,14 @@ ipcMain.handle('update:apply', async (event) => {
       }
     })
     if (result.ok) {
+      if (!spawnApplyScript(ROOT)) {
+        return {
+          ok: false,
+          error: 'Could not start the installer process. Close Chrome and WhatsApp Sender, then try again.',
+        }
+      }
       // التطبيق يقفل نفسه والسكربت الخارجي يكمل الاستبدال ويعيد التشغيل
       stopPythonApi()
-      spawnApplyScript(ROOT)
       setTimeout(() => {
         app.exit(0)
       }, 600)

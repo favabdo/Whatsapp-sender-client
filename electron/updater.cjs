@@ -263,13 +263,16 @@ async function checkForUpdate(root) {
 
   const newer = compareVersions(remoteVersion, localVersion) > 0
 
-  // Prefer a Release ZIP if it exists and matches/exceeds remote version
+  // A Release asset is only usable when it is the SAME build the remote
+  // update-config.json advertises — otherwise a stale release would install
+  // old files under a new version number.
   let assetName = null
   let assetUrl = null
   let browserDownloadUrl = null
   let releaseName = null
   let releaseUrl = null
   let downloadMode = 'zipball'
+  let releaseNote = ''
 
   try {
     const release = await githubRequest(
@@ -285,7 +288,11 @@ async function checkForUpdate(root) {
       assets.find((a) => String(a.name || '').toLowerCase().includes(needle)) ||
       assets.find((a) => String(a.name || '').toLowerCase().endsWith('.zip')) ||
       null
-    if (asset && compareVersions(releaseVersion, localVersion) > 0) {
+    if (!asset) {
+      releaseNote = 'release has no usable asset'
+    } else if (compareVersions(releaseVersion, remoteVersion) !== 0) {
+      releaseNote = `release ${releaseVersion || '?'} != remote ${remoteVersion}`
+    } else {
       assetName = asset.name
       assetUrl = asset.url || null
       browserDownloadUrl = asset.browser_download_url || null
@@ -294,10 +301,9 @@ async function checkForUpdate(root) {
       downloadMode = 'release'
     }
   } catch (_) {
-    /* no releases — use repo zipball */
+    releaseNote = 'no releases'
   }
 
-  // Fallback: whole branch as zip (runnable files must be in the repo)
   const zipballUrl = `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${encodeURIComponent(branch)}`
 
   return {
@@ -313,6 +319,7 @@ async function checkForUpdate(root) {
     browserDownloadUrl,
     zipballUrl,
     downloadMode,
+    releaseNote,
     notes: '',
   }
 }
@@ -322,24 +329,87 @@ function psQuote(p) {
 }
 
 function buildApplyScript(root, payloadDir, version) {
-  return `$ErrorActionPreference = 'SilentlyContinue'
+  return `$ErrorActionPreference = 'Continue'
 $root = '${psQuote(root)}'
 $payload = '${psQuote(payloadDir)}'
 $tmp = Join-Path $root '_update_tmp'
+$log = Join-Path $root 'update.log'
 $nextVersion = '${psQuote(normalizeVersion(version || '0.0.0'))}'
-Start-Sleep -Seconds 5
-Stop-Process -Name 'WhatsAppSenderAPI' -Force
-Stop-Process -Name 'chromedriver' -Force
-Stop-Process -Name 'WhatsApp Sender' -Force
-Start-Sleep -Seconds 2
-if (Test-Path (Join-Path $payload '_internal')) {
-  robocopy (Join-Path $payload '_internal') (Join-Path $root '_internal') /MIR /R:20 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+
+function Log($msg) { [IO.File]::AppendAllText($log, (Get-Date -Format 's') + '  ' + $msg + [Environment]::NewLine) }
+
+function Wait-Exit($name, $seconds) {
+  $deadline = (Get-Date).AddSeconds($seconds)
+  while ((Get-Date) -lt $deadline) {
+    if (-not (Get-Process -Name $name -ErrorAction SilentlyContinue)) { return $true }
+    Start-Sleep -Milliseconds 500
+  }
+  return $false
 }
-if (Test-Path (Join-Path $payload 'frontend')) {
-  New-Item -ItemType Directory -Force -Path (Join-Path $root 'frontend') | Out-Null
-  robocopy (Join-Path $payload 'frontend') (Join-Path $root 'frontend') /MIR /R:20 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+
+# 1) Close the running app (its own process tree) and wait for released locks
+Start-Sleep -Seconds 3
+Stop-Process -Name 'WhatsAppSenderAPI' -Force -ErrorAction SilentlyContinue
+Stop-Process -Name 'chromedriver' -Force -ErrorAction SilentlyContinue
+Stop-Process -Name 'WhatsApp Sender' -Force -ErrorAction SilentlyContinue
+$stuck = @()
+foreach ($n in 'WhatsAppSenderAPI', 'chromedriver', 'WhatsApp Sender') {
+  if (-not (Wait-Exit $n 20)) { $stuck += $n }
 }
-robocopy $payload $root /E /XF update-config.json /XD secure wa_chrome_profile uploads node_modules _update_tmp /R:20 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+Log ("closed processes; stuck=" + $(if ($stuck) { $stuck -join ',' } else { 'none' }))
+if ($stuck) { Log 'abort: process still holding files, nothing was changed'; exit 1 }
+
+# 2) The payload must be a COMPLETE build before anything is replaced
+$required = @('WhatsApp Sender.exe', 'WhatsAppSenderAPI.exe', 'electron\\main.cjs', 'electron\\updater.cjs', 'frontend\\dist\\index.html', '_internal')
+$missing = @($required | Where-Object { -not (Test-Path (Join-Path $payload $_)) })
+if ($missing.Count -gt 0) {
+  Log ('abort: package incomplete, missing=' + ($missing -join ','))
+  Set-Content -LiteralPath (Join-Path $root 'UPDATE_FAILED.txt') -Value ('Downloaded package is incomplete (missing: ' + ($missing -join ', ') + '). The installed version was NOT changed. Re-run the update or reinstall the full package.') -Encoding UTF8
+  exit 1
+}
+Log 'payload verified complete'
+
+# 3) Full rebuild of everything the package ships: each packaged folder is
+#    mirrored, so files from the previous build layout are removed instead of
+#    surviving next to the new ones. Folders the customer made are left alone.
+$skipDirs = @('secure', 'node_modules', 'wa_chrome_profile', 'uploads', '.git', '_update_tmp')
+$pkgDirs = @(Get-ChildItem -LiteralPath $payload -Directory | Where-Object { $skipDirs -notcontains $_.Name })
+$copyFail = @()
+foreach ($d in $pkgDirs) {
+  $extra = @()
+  if ($d.Name -eq '_internal') { $extra = @('/XD', 'electron') }
+  robocopy (Join-Path $payload $d.Name) (Join-Path $root $d.Name) /MIR /R:20 /W:2 /NFL /NDL /NJH /NJS $extra | Out-Null
+  if ($LASTEXITCODE -ge 8) { $copyFail += $d.Name }
+}
+Get-ChildItem -LiteralPath $payload -File | Where-Object { $_.Name -ne 'update-config.json' } | ForEach-Object {
+  try { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $root $_.Name) -Force } catch { $copyFail += $_.Name }
+}
+# folders from obsolete build layouts
+foreach ($old in 'WhatsAppSenderAPI', 'electron_runtime', 'src', 'build') {
+  $p = Join-Path $root $old
+  if ((Test-Path $p) -and -not (Test-Path (Join-Path $payload $old))) {
+    Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+$mirrored = ($pkgDirs | ForEach-Object { $_.Name }) -join ','
+Log ('mirrored dirs = ' + $mirrored)
+if ($copyFail.Count -gt 0) {
+  Log ('abort: copy failed for ' + ($copyFail -join ','))
+  Set-Content -LiteralPath (Join-Path $root 'UPDATE_FAILED.txt') -Value ('Some files could not be replaced (' + ($copyFail -join ', ') + '). The installed version was NOT changed. Close Chrome/WhatsApp Sender and run the update again.') -Encoding UTF8
+  exit 1
+}
+
+# 4) Local data that must survive a rebuild
+try {
+  $dstSecure = Join-Path $root 'secure'
+  if (-not (Test-Path (Join-Path $dstSecure 'users.key')) -and (Test-Path (Join-Path $payload 'secure\\users.key'))) {
+    New-Item -ItemType Directory -Force -Path $dstSecure | Out-Null
+    Copy-Item (Join-Path $payload 'secure\\users.key') (Join-Path $dstSecure 'users.key') -Force
+    Log 'restored secure/users.key'
+  }
+} catch { Log ('users.key restore failed: ' + $_) }
+
+# 5) Only now mark this build as installed
 try {
   $cfgPath = Join-Path $root 'update-config.json'
   if (Test-Path $cfgPath) { $j = Get-Content $cfgPath -Raw | ConvertFrom-Json } else { $j = [pscustomobject]@{} }
@@ -350,29 +420,59 @@ try {
   if (-not $j.assetNameContains) { $j | Add-Member -Force -NotePropertyName assetNameContains -NotePropertyValue 'WhatsApp-Sender-Client' }
   if ($null -eq $j.githubToken) { $j | Add-Member -Force -NotePropertyName githubToken -NotePropertyValue '' }
   [IO.File]::WriteAllText($cfgPath, ($j | ConvertTo-Json))
-} catch {}
-Remove-Item (Join-Path $tmp 'update.zip') -Force
-Remove-Item (Join-Path $tmp 'extract') -Recurse -Force
+  Remove-Item (Join-Path $root 'UPDATE_FAILED.txt') -Force -ErrorAction SilentlyContinue
+  Log ('installed ' + $nextVersion)
+} catch { Log ('version stamp failed: ' + $_) }
+
+# 6) Clean the staging area and relaunch
+Remove-Item (Join-Path $tmp 'update.zip') -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $tmp 'extract') -Recurse -Force -ErrorAction SilentlyContinue
 Start-Process -FilePath (Join-Path $root 'Start WhatsApp Sender.bat') -WindowStyle Hidden
 `;
 }
 
+// Electron runs inside a kill-on-exit job object: any child process — detached
+// or not — dies with app.exit(). Creating the updater through WMI hands it to
+// the WMI provider instead, so it outlives the app.
 function spawnApplyScript(root) {
   const script = path.join(root, '_update_tmp', 'apply_update.ps1')
-  const child = spawn(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-WindowStyle',
-      'Hidden',
-      '-File',
-      script,
-    ],
-    { detached: true, stdio: 'ignore', windowsHide: true },
-  )
-  child.unref()
+  if (!fs.existsSync(script)) return false
+  const cmd = `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${script}"`
+  try {
+    const out = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `$r = Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList @('${psQuote(cmd)}'); $r.ReturnValue`,
+      ],
+      { windowsHide: true, encoding: 'utf8', timeout: 30000 },
+    )
+    if (String(out).trim() === '0') return true
+  } catch (_) {
+    /* WMI unavailable (hardened service) — try the plain spawn anyway */
+  }
+  try {
+    const child = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        script,
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: true },
+    )
+    child.unref()
+    return true
+  } catch (_) {
+    return false
+  }
 }
 
 async function stageUpdate(root, sendProgress) {
@@ -421,6 +521,26 @@ async function stageUpdate(root, sendProgress) {
     if (fs.statSync(only).isDirectory()) payloadDir = only
   }
 
+  // Never install a package that is not the version the channel advertises:
+  // doing so left customers with old build files under a new version number.
+  let payloadVersion = ''
+  try {
+    payloadVersion = normalizeVersion(
+      JSON.parse(
+        fs.readFileSync(path.join(payloadDir, 'update-config.json'), 'utf8'),
+      ).version,
+    )
+  } catch {
+    payloadVersion = ''
+  }
+  if (payloadVersion !== info.remoteVersion) {
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+    return {
+      ok: false,
+      error: `Downloaded package is version ${payloadVersion || 'unknown'}, expected ${info.remoteVersion}. Update aborted — nothing was changed.`,
+    }
+  }
+
   fs.writeFileSync(
     path.join(tmpRoot, 'pending_version.txt'),
     info.remoteVersion,
@@ -435,8 +555,11 @@ async function stageUpdate(root, sendProgress) {
 // Legacy entry — kept for older callers; now stages instead of copying in-place.
 async function applyUpdate(root, sendProgress) {
   const result = await stageUpdate(root, sendProgress)
-  if (result.ok) {
-    spawnApplyScript(root)
+  if (result.ok && !spawnApplyScript(root)) {
+    return {
+      ok: false,
+      error: 'Could not start the installer process. Close Chrome and WhatsApp Sender, then try again.',
+    }
   }
   return result
 }

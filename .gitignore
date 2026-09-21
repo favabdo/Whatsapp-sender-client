@@ -6,6 +6,8 @@ uploads/
 wa_chrome_profile/
 _update_tmp/
 output.log
+update.log
+UPDATE_FAILED.txt
 *.zip
 .DS_Store
 Thumbs.db
