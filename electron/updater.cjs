@@ -183,8 +183,15 @@ function downloadFile(url, dest, token, onProgress) {
             }
           })
           res.pipe(out)
+          res.on('error', reject)
           out.on('finish', () => {
-            out.close(() => resolve(dest))
+            out.close(() => {
+              if (total && got < total) {
+                reject(new Error(`Download stopped early (${got} of ${total} bytes)`))
+                return
+              }
+              resolve(dest)
+            })
           })
           out.on('error', reject)
         },
@@ -328,6 +335,17 @@ function psQuote(p) {
   return String(p).replace(/'/g, "''")
 }
 
+// A package missing any of these would leave the install unable to start.
+const REQUIRED_BUILD_ENTRIES = [
+  'WhatsApp Sender.exe',
+  'WhatsAppSenderAPI.exe',
+  'electron/main.cjs',
+  'electron/updater.cjs',
+  'frontend/dist/index.html',
+  '_internal/base_library.zip',
+  '_internal',
+]
+
 function buildApplyScript(root, payloadDir, version) {
   return `$ErrorActionPreference = 'Continue'
 $root = '${psQuote(root)}'
@@ -360,7 +378,7 @@ Log ("closed processes; stuck=" + $(if ($stuck) { $stuck -join ',' } else { 'non
 if ($stuck) { Log 'abort: process still holding files, nothing was changed'; exit 1 }
 
 # 2) The payload must be a COMPLETE build before anything is replaced
-$required = @('WhatsApp Sender.exe', 'WhatsAppSenderAPI.exe', 'electron\\main.cjs', 'electron\\updater.cjs', 'frontend\\dist\\index.html', '_internal')
+$required = @(${REQUIRED_BUILD_ENTRIES.map((f) => `'${psQuote(f.split('/').join('\\'))}'`).join(', ')})
 $missing = @($required | Where-Object { -not (Test-Path (Join-Path $payload $_)) })
 if ($missing.Count -gt 0) {
   Log ('abort: package incomplete, missing=' + ($missing -join ','))
@@ -427,7 +445,14 @@ try {
 # 6) Clean the staging area and relaunch
 Remove-Item (Join-Path $tmp 'update.zip') -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $tmp 'extract') -Recurse -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath (Join-Path $root 'Start WhatsApp Sender.bat') -WindowStyle Hidden
+$started = $false
+for ($i = 0; $i -lt 4 -and -not $started; $i += 1) {
+  try { Start-Process -FilePath (Join-Path $root 'WhatsApp Sender.exe') -WorkingDirectory $root -WindowStyle Hidden -ErrorAction Stop; $started = $true } catch { Start-Sleep -Seconds 3 }
+}
+if (-not $started) {
+  try { Start-Process -FilePath (Join-Path $root 'Start WhatsApp Sender.bat') -WorkingDirectory $root -WindowStyle Hidden -ErrorAction Stop; $started = $true } catch { Log ('relaunch failed: ' + $_) }
+}
+Log ('relaunched=' + $started)
 `;
 }
 
@@ -483,7 +508,11 @@ async function stageUpdate(root, sendProgress) {
   const cfg = loadConfig(root)
   const token = String(cfg.githubToken || process.env.GITHUB_TOKEN || '').trim()
   const tmpRoot = path.join(root, '_update_tmp')
-  fs.rmSync(tmpRoot, { recursive: true, force: true })
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  } catch {
+    /* previous run still locked by antivirus — continue with what is deletable */
+  }
   fs.mkdirSync(tmpRoot, { recursive: true })
   const zipPath = path.join(tmpRoot, 'update.zip')
   sendProgress?.({ phase: 'download', percent: 0 })
@@ -503,22 +532,45 @@ async function stageUpdate(root, sendProgress) {
   })
   sendProgress?.({ phase: 'extract', percent: 100 })
   const extractDir = path.join(tmpRoot, 'extract')
-  fs.mkdirSync(extractDir, { recursive: true })
-  execFileSync(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-Command',
-      `Expand-Archive -LiteralPath '${psQuote(zipPath)}' -DestinationPath '${psQuote(extractDir)}' -Force`,
-    ],
-    { windowsHide: true },
-  )
+  try {
+    fs.rmSync(extractDir, { recursive: true, force: true })
+  } catch {
+    /* locked leftovers — ExtractToDirectory creates what it can */
+  }
+  try {
+    execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        `Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory('${psQuote(zipPath)}', '${psQuote(extractDir)}')`,
+      ],
+      { windowsHide: true },
+    )
+  } catch (e) {
+    return {
+      ok: false,
+      error: `Could not unpack the update (${e instanceof Error ? e.message.split('\n')[0] : String(e)}). Nothing was changed — try again, or allow the app folder in your antivirus.`,
+    }
+  }
 
   let payloadDir = extractDir
   const kids = fs.readdirSync(extractDir)
   if (kids.length === 1) {
     const only = path.join(extractDir, kids[0])
     if (fs.statSync(only).isDirectory()) payloadDir = only
+  }
+
+  // Checked here, while the app is still open, so a broken download never
+  // reaches the point of no return.
+  const missing = REQUIRED_BUILD_ENTRIES.filter(
+    (f) => !fs.existsSync(path.join(payloadDir, f)),
+  )
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: `Downloaded package is incomplete (missing: ${missing.join(', ')}). Nothing was changed — try again, or allow the app folder in your antivirus.`,
+    }
   }
 
   // Never install a package that is not the version the channel advertises:
